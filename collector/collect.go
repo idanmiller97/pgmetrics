@@ -541,6 +541,15 @@ func (c *collector) collectCluster(o CollectConfig) {
 	if !arrayHas(o.Omit, "log") && c.local {
 		c.getLogInfo()
 	}
+
+	// following fields are present only in schema 1.19 and later
+	// monitoring queries for active sessions, replication, and wait events
+	c.getActiveSessions()
+	c.getReplicationStatus()
+	c.getReplicationSlotsDetailed()
+	c.getWaitEventSummary()
+	c.getBlockedSessions()
+	c.getWALReceiverStatus()
 }
 
 // info and stats for the current database
@@ -3697,3 +3706,241 @@ FROM (
 ) AS sml
  WHERE sml.relpages - otta > 10 OR ipages - iotta > 15
 `
+
+// getActiveSessions collects active sessions with wait events and duration.
+func (c *collector) getActiveSessions() {
+	ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
+	defer cancel()
+
+	q := `SELECT
+		pid, wait_event_type, wait_event, query, state,
+		EXTRACT(EPOCH FROM (now() - query_start)) AS duration
+		FROM pg_stat_activity
+		WHERE wait_event IS NOT NULL AND state='active'
+		ORDER BY duration DESC`
+	
+	rows, err := c.db.QueryContext(ctx, q)
+	if err != nil {
+		log.Printf("warning: active sessions query failed: %v", err)
+		return
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var as pgmetrics.ActiveSession
+		if err := rows.Scan(&as.PID, &as.WaitEventType, &as.WaitEvent, 
+			&as.Query, &as.State, &as.Duration); err != nil {
+			log.Printf("warning: active sessions scan failed: %v", err)
+			continue
+		}
+		c.result.ActiveSessions = append(c.result.ActiveSessions, as)
+	}
+	if err := rows.Err(); err != nil {
+		log.Printf("warning: active sessions query failed: %v", err)
+	}
+}
+
+// getReplicationStatus collects replication status information.
+func (c *collector) getReplicationStatus() {
+	ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
+	defer cancel()
+
+	q := `SELECT pid, state, application_name, client_addr, 
+		EXTRACT(EPOCH FROM backend_start)::bigint AS backend_start,
+		sent_lsn, write_lsn, flush_lsn, replay_lsn
+		FROM pg_stat_replication
+		ORDER BY pid ASC`
+	
+	rows, err := c.db.QueryContext(ctx, q)
+	if err != nil {
+		log.Printf("warning: replication status query failed: %v", err)
+		return
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var rs pgmetrics.ReplicationStatus
+		var sentLSN, writeLSN, flushLSN, replayLSN sql.NullString
+		if err := rows.Scan(&rs.PID, &rs.State, &rs.ApplicationName, &rs.ClientAddr,
+			&rs.BackendStart, &sentLSN, &writeLSN, &flushLSN, &replayLSN); err != nil {
+			log.Printf("warning: replication status scan failed: %v", err)
+			continue
+		}
+		rs.SentLSN = sentLSN.String
+		rs.WriteLSN = writeLSN.String
+		rs.FlushLSN = flushLSN.String
+		rs.ReplayLSN = replayLSN.String
+		c.result.ReplicationStatus = append(c.result.ReplicationStatus, rs)
+	}
+	if err := rows.Err(); err != nil {
+		log.Printf("warning: replication status query failed: %v", err)
+	}
+}
+
+// getReplicationSlotsDetailed collects detailed replication slot information.
+func (c *collector) getReplicationSlotsDetailed() {
+	ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
+	defer cancel()
+
+	q := `SELECT slot_name, plugin, slot_type, active, restart_lsn, confirmed_flush_lsn
+		FROM pg_replication_slots
+		ORDER BY slot_name ASC`
+	
+	rows, err := c.db.QueryContext(ctx, q)
+	if err != nil {
+		log.Printf("warning: replication slots detailed query failed: %v", err)
+		return
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var rs pgmetrics.ReplicationSlot
+		var restartLSN, confirmedFlushLSN sql.NullString
+		if err := rows.Scan(&rs.SlotName, &rs.Plugin, &rs.SlotType, &rs.Active,
+			&restartLSN, &confirmedFlushLSN); err != nil {
+			log.Printf("warning: replication slots detailed scan failed: %v", err)
+			continue
+		}
+		rs.RestartLSN = restartLSN.String
+		rs.ConfirmedFlushLSN = confirmedFlushLSN.String
+		// Note: This will be added to the existing ReplicationSlots slice
+		// We need to check if it already exists to avoid duplicates
+		found := false
+		for _, existing := range c.result.ReplicationSlots {
+			if existing.SlotName == rs.SlotName {
+				found = true
+				break
+			}
+		}
+		if !found {
+			c.result.ReplicationSlots = append(c.result.ReplicationSlots, rs)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		log.Printf("warning: replication slots detailed query failed: %v", err)
+	}
+}
+
+// getWaitEventSummary collects wait event summary information.
+func (c *collector) getWaitEventSummary() {
+	ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
+	defer cancel()
+
+	q := `SELECT wait_event_type, wait_event, COUNT(*) AS sessions
+		FROM pg_stat_activity
+		WHERE state = 'active'
+		GROUP BY wait_event_type, wait_event
+		ORDER BY COUNT(*) DESC`
+	
+	rows, err := c.db.QueryContext(ctx, q)
+	if err != nil {
+		log.Printf("warning: wait event summary query failed: %v", err)
+		return
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var wes pgmetrics.WaitEventSummary
+		if err := rows.Scan(&wes.WaitEventType, &wes.WaitEvent, &wes.Sessions); err != nil {
+			log.Printf("warning: wait event summary scan failed: %v", err)
+			continue
+		}
+		c.result.WaitEventSummary = append(c.result.WaitEventSummary, wes)
+	}
+	if err := rows.Err(); err != nil {
+		log.Printf("warning: wait event summary query failed: %v", err)
+	}
+}
+
+// getBlockedSessions collects information about blocked sessions.
+func (c *collector) getBlockedSessions() {
+	ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
+	defer cancel()
+
+	q := `SELECT a.pid AS blocked_pid,
+		a.wait_event_type,
+		a.wait_event,
+		a.query AS blocked_query,
+		pg_blocking_pids(a.pid) AS blocking_pids
+		FROM pg_stat_activity AS a
+		WHERE array_length(pg_blocking_pids(a.pid), 1) > 0
+		ORDER BY a.pid ASC`
+	
+	rows, err := c.db.QueryContext(ctx, q)
+	if err != nil {
+		log.Printf("warning: blocked sessions query failed: %v", err)
+		return
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var bs pgmetrics.BlockedSession
+		var blockingPIDs []int32
+		if err := rows.Scan(&bs.BlockedPID, &bs.WaitEventType, &bs.WaitEvent,
+			&bs.BlockedQuery, &blockingPIDs); err != nil {
+			log.Printf("warning: blocked sessions scan failed: %v", err)
+			continue
+		}
+		// Convert []int32 to []int
+		bs.BlockingPIDs = make([]int, len(blockingPIDs))
+		for i, pid := range blockingPIDs {
+			bs.BlockingPIDs[i] = int(pid)
+		}
+		c.result.BlockedSessions = append(c.result.BlockedSessions, bs)
+	}
+	if err := rows.Err(); err != nil {
+		log.Printf("warning: blocked sessions query failed: %v", err)
+	}
+}
+
+// getWALReceiverStatus collects WAL receiver status information.
+func (c *collector) getWALReceiverStatus() {
+	ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
+	defer cancel()
+
+	q := `SELECT pid, status, receive_start_lsn, receive_start_tli,
+		received_lsn, received_tli,
+		EXTRACT(EPOCH FROM last_msg_send_time)::bigint AS last_msg_send_time,
+		EXTRACT(EPOCH FROM last_msg_receipt_time)::bigint AS last_msg_receipt_time,
+		latency, latest_end_lsn,
+		EXTRACT(EPOCH FROM latest_end_time)::bigint AS latest_end_time,
+		slot_name, conninfo
+		FROM pg_stat_wal_receiver
+		LIMIT 1`
+	
+	rows, err := c.db.QueryContext(ctx, q)
+	if err != nil {
+		log.Printf("warning: WAL receiver status query failed: %v", err)
+		return
+	}
+	defer rows.Close()
+
+	if rows.Next() {
+		var wrs pgmetrics.WALReceiverStatus
+		var receiveStartLSN, receivedLSN, latestEndLSN, conninfo sql.NullString
+		var lastMsgSendTime, lastMsgReceiptTime, latestEndTime sql.NullInt64
+		if err := rows.Scan(&wrs.PID, &wrs.Status, &receiveStartLSN, &wrs.ReceiveStartTLI,
+			&receivedLSN, &wrs.ReceivedTLI, &lastMsgSendTime, &lastMsgReceiptTime,
+			&wrs.Latency, &latestEndLSN, &latestEndTime, &wrs.SlotName, &conninfo); err != nil {
+			log.Printf("warning: WAL receiver status scan failed: %v", err)
+			return
+		}
+		wrs.ReceiveStartLSN = receiveStartLSN.String
+		wrs.ReceivedLSN = receivedLSN.String
+		wrs.LatestEndLSN = latestEndLSN.String
+		wrs.Conninfo = conninfo.String
+		if lastMsgSendTime.Valid {
+			wrs.LastMsgSendTime = lastMsgSendTime.Int64
+		}
+		if lastMsgReceiptTime.Valid {
+			wrs.LastMsgReceiptTime = lastMsgReceiptTime.Int64
+		}
+		if latestEndTime.Valid {
+			wrs.LatestEndTime = latestEndTime.Int64
+		}
+		c.result.WALReceiverStatus = &wrs
+	}
+	if err := rows.Err(); err != nil {
+		log.Printf("warning: WAL receiver status query failed: %v", err)
+	}
+}

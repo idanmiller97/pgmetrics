@@ -19,6 +19,7 @@ package pgmetrics
 // ModelSchemaVersion is the schema version of the "Model" data structure
 // defined below. It is in the "semver" notation. Version history:
 //
+//	1.19 - Add monitoring queries for active sessions, replication, and wait events
 //	1.18 - Add schema name for extensions
 //	1.17 - Raw log entries, Postgres 17 support
 //	1.16 - Postgres 16 support
@@ -39,7 +40,7 @@ package pgmetrics
 //	1.2 - more table and index attributes
 //	1.1 - added NotificationQueueUsage and Statements
 //	1.0 - initial release
-const ModelSchemaVersion = "1.18"
+const ModelSchemaVersion = "1.19"
 
 // Model contains the entire information collected by a single run of
 // pgmetrics. It can be converted to and from json without loss of
@@ -200,6 +201,15 @@ type Model struct {
 
 	// value of pg_conf_load_time() as seconds since epoch
 	ConfLoadTime int64 `json:"conf_load_time,omitempty"`
+
+	// following fields are present only in schema 1.19 and later
+
+	// monitoring queries for active sessions, replication, and wait events
+	ActiveSessions     []ActiveSession     `json:"active_sessions,omitempty"`
+	ReplicationStatus  []ReplicationStatus `json:"replication_status,omitempty"`
+	WaitEventSummary   []WaitEventSummary  `json:"wait_event_summary,omitempty"`
+	BlockedSessions    []BlockedSession    `json:"blocked_sessions,omitempty"`
+	WALReceiverStatus  *WALReceiverStatus  `json:"wal_receiver_status,omitempty"`
 }
 
 // DatabaseByOID iterates over the databases in the model and returns the reference
@@ -1139,4 +1149,65 @@ type Checkpointer struct {
 	SyncTime               float64 `json:"sync_time"`
 	BuffersWritten         int64   `json:"buffers_written"`
 	StatsReset             int64   `json:"stats_reset"`
+}
+
+// ActiveSession represents an active session with wait events and duration.
+// Added in schema 1.19.
+type ActiveSession struct {
+	PID        int     `json:"pid"`
+	WaitEventType string `json:"wait_event_type"`
+	WaitEvent   string `json:"wait_event"`
+	Query       string `json:"query"`
+	State       string `json:"state"`
+	Duration    float64 `json:"duration"` // in seconds
+}
+
+// ReplicationStatus represents replication status information.
+// Added in schema 1.19.
+type ReplicationStatus struct {
+	PID             int    `json:"pid"`
+	State           string `json:"state"`
+	ApplicationName string `json:"application_name"`
+	ClientAddr      string `json:"client_addr"`
+	BackendStart    int64  `json:"backend_start"`
+	SentLSN         string `json:"sent_lsn"`
+	WriteLSN        string `json:"write_lsn"`
+	FlushLSN        string `json:"flush_lsn"`
+	ReplayLSN       string `json:"replay_lsn"`
+}
+
+// WaitEventSummary represents a summary of wait events by type and event.
+// Added in schema 1.19.
+type WaitEventSummary struct {
+	WaitEventType string `json:"wait_event_type"`
+	WaitEvent     string `json:"wait_event"`
+	Sessions      int    `json:"sessions"`
+}
+
+// BlockedSession represents a session that is blocked by other sessions.
+// Added in schema 1.19.
+type BlockedSession struct {
+	BlockedPID    int      `json:"blocked_pid"`
+	WaitEventType string   `json:"wait_event_type"`
+	WaitEvent     string   `json:"wait_event"`
+	BlockedQuery  string   `json:"blocked_query"`
+	BlockingPIDs  []int    `json:"blocking_pids"`
+}
+
+// WALReceiverStatus represents WAL receiver status information.
+// Added in schema 1.19.
+type WALReceiverStatus struct {
+	PID              int    `json:"pid"`
+	Status           string `json:"status"`
+	ReceiveStartLSN  string `json:"receive_start_lsn"`
+	ReceiveStartTLI  int    `json:"receive_start_tli"`
+	ReceivedLSN      string `json:"received_lsn"`
+	ReceivedTLI      int    `json:"received_tli"`
+	LastMsgSendTime  int64  `json:"last_msg_send_time"`
+	LastMsgReceiptTime int64 `json:"last_msg_receipt_time"`
+	Latency          int64  `json:"latency_micros"`
+	LatestEndLSN     string `json:"latest_end_lsn"`
+	LatestEndTime    int64  `json:"latest_end_time"`
+	SlotName         string `json:"slot_name"`
+	Conninfo         string `json:"conninfo"`
 }

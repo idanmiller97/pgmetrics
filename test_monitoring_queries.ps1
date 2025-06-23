@@ -9,7 +9,7 @@ Write-Host ""
 Connection parameters
 $env:PGSSLMODE = "require"
 $env:PGPASSWORD = ""
-$hostname = "psql-infra-eastus-qa.postgres.database.azure.com"
+$hostname = ""
 $port = "5432"
 $user = "postgres"
 

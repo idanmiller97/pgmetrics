@@ -1201,11 +1201,8 @@ type WALReceiverStatus struct {
 	Status           string `json:"status"`
 	ReceiveStartLSN  string `json:"receive_start_lsn"`
 	ReceiveStartTLI  int    `json:"receive_start_tli"`
-	ReceivedLSN      string `json:"received_lsn"`
-	ReceivedTLI      int    `json:"received_tli"`
 	LastMsgSendTime  int64  `json:"last_msg_send_time"`
 	LastMsgReceiptTime int64 `json:"last_msg_receipt_time"`
-	Latency          int64  `json:"latency_micros"`
 	LatestEndLSN     string `json:"latest_end_lsn"`
 	LatestEndTime    int64  `json:"latest_end_time"`
 	SlotName         string `json:"slot_name"`

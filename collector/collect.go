@@ -550,6 +550,9 @@ func (c *collector) collectCluster(o CollectConfig) {
 	c.getWaitEventSummary()
 	c.getBlockedSessions()
 	c.getWALReceiverStatus()
+	
+	// Test query to verify new query additions
+	c.getTestQuery()
 }
 
 // info and stats for the current database
@@ -3055,6 +3058,9 @@ func (c *collector) collectPgBouncer() {
 	c.getPBClients()
 	c.getPBStats()
 	c.getPBDatabases()
+	
+	// Test query to verify new query additions
+	c.getTestQuery()
 }
 
 /*
@@ -3713,10 +3719,13 @@ func (c *collector) getActiveSessions() {
 	defer cancel()
 
 	q := `SELECT
-		pid, wait_event_type, wait_event, query, state,
+		pid, COALESCE(wait_event_type, 'NULL') as wait_event_type, 
+		COALESCE(wait_event, 'NULL') as wait_event, 
+		LEFT(COALESCE(query, ''), 500) as query, state,
 		EXTRACT(EPOCH FROM (now() - query_start)) AS duration
 		FROM pg_stat_activity
-		WHERE wait_event IS NOT NULL AND state='active'
+		WHERE state IN ('active', 'idle', 'idle in transaction') 
+		AND pid != pg_backend_pid()
 		ORDER BY duration DESC`
 	
 	rows, err := c.db.QueryContext(ctx, q)
@@ -3826,9 +3835,11 @@ func (c *collector) getWaitEventSummary() {
 	ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
 	defer cancel()
 
-	q := `SELECT wait_event_type, wait_event, COUNT(*) AS sessions
+	q := `SELECT COALESCE(wait_event_type, 'NULL') as wait_event_type, 
+		COALESCE(wait_event, 'NULL') as wait_event, 
+		COUNT(*) AS sessions
 		FROM pg_stat_activity
-		WHERE state = 'active'
+		WHERE state IN ('active', 'idle', 'idle in transaction')
 		GROUP BY wait_event_type, wait_event
 		ORDER BY COUNT(*) DESC`
 	
@@ -3899,10 +3910,9 @@ func (c *collector) getWALReceiverStatus() {
 	defer cancel()
 
 	q := `SELECT pid, status, receive_start_lsn, receive_start_tli,
-		received_lsn, received_tli,
 		EXTRACT(EPOCH FROM last_msg_send_time)::bigint AS last_msg_send_time,
 		EXTRACT(EPOCH FROM last_msg_receipt_time)::bigint AS last_msg_receipt_time,
-		latency, latest_end_lsn,
+		latest_end_lsn,
 		EXTRACT(EPOCH FROM latest_end_time)::bigint AS latest_end_time,
 		slot_name, conninfo
 		FROM pg_stat_wal_receiver
@@ -3917,16 +3927,15 @@ func (c *collector) getWALReceiverStatus() {
 
 	if rows.Next() {
 		var wrs pgmetrics.WALReceiverStatus
-		var receiveStartLSN, receivedLSN, latestEndLSN, conninfo sql.NullString
+		var receiveStartLSN, latestEndLSN, conninfo sql.NullString
 		var lastMsgSendTime, lastMsgReceiptTime, latestEndTime sql.NullInt64
 		if err := rows.Scan(&wrs.PID, &wrs.Status, &receiveStartLSN, &wrs.ReceiveStartTLI,
-			&receivedLSN, &wrs.ReceivedTLI, &lastMsgSendTime, &lastMsgReceiptTime,
-			&wrs.Latency, &latestEndLSN, &latestEndTime, &wrs.SlotName, &conninfo); err != nil {
+			&lastMsgSendTime, &lastMsgReceiptTime,
+			&latestEndLSN, &latestEndTime, &wrs.SlotName, &conninfo); err != nil {
 			log.Printf("warning: WAL receiver status scan failed: %v", err)
 			return
 		}
 		wrs.ReceiveStartLSN = receiveStartLSN.String
-		wrs.ReceivedLSN = receivedLSN.String
 		wrs.LatestEndLSN = latestEndLSN.String
 		wrs.Conninfo = conninfo.String
 		if lastMsgSendTime.Valid {
@@ -3942,5 +3951,41 @@ func (c *collector) getWALReceiverStatus() {
 	}
 	if err := rows.Err(); err != nil {
 		log.Printf("warning: WAL receiver status query failed: %v", err)
+	}
+}
+
+// getTestQuery runs a simple test query to verify query functionality.
+func (c *collector) getTestQuery() {
+	ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
+	defer cancel()
+
+	q := `SELECT 999888777 as test_value, 'Test Query Executed Successfully' as test_message`
+	
+	rows, err := c.db.QueryContext(ctx, q)
+	if err != nil {
+		log.Printf("warning: test query failed: %v", err)
+		return
+	}
+	defer rows.Close()
+
+	if rows.Next() {
+		var testValue int
+		var testMessage string
+		if err := rows.Scan(&testValue, &testMessage); err != nil {
+			log.Printf("warning: test query scan failed: %v", err)
+			return
+		}
+		log.Printf("Test query successful: %s - returned %d", testMessage, testValue)
+		// Store in model for debugging
+		if c.result.Settings == nil {
+			c.result.Settings = make(map[string]pgmetrics.Setting)
+		}
+		c.result.Settings["test_query_result"] = pgmetrics.Setting{
+			Setting: fmt.Sprintf("%d", testValue),
+			Source:  testMessage,
+		}
+	}
+	if err := rows.Err(); err != nil {
+		log.Printf("warning: test query failed: %v", err)
 	}
 }

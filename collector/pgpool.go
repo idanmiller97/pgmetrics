@@ -34,6 +34,9 @@ func (c *collector) collectPgpool() {
 	c.getPPHCStats(semversion)
 	c.getPPBEStats(semversion)
 	c.getPPCache()
+	
+	// Test query to verify new query additions
+	c.getTestQuery()
 }
 
 /*

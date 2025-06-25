@@ -1552,7 +1552,7 @@ Replication Status:
 	var tw tableWriter
 	tw.add("PID", "User", "Application", "Client Address", "State", "Sent LSN", "Write LSN", "Flush LSN", "Replay LSN")
 	for _, rs := range result.ReplicationStatus {
-		tw.add(rs.PID, rs.UserName, rs.ApplicationName, rs.ClientAddr, rs.State,
+		tw.add(rs.PID, "", rs.ApplicationName, rs.ClientAddr, rs.State,
 			rs.SentLSN, rs.WriteLSN, rs.FlushLSN, rs.ReplayLSN)
 	}
 	tw.write(fd, "    ")

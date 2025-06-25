@@ -27,12 +27,14 @@ archives:
     wrap_in_directory: true
     name_template: '{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}'
 release:
-  draft: true
-  github:
-    owner: rapidloop
-    name: pgmetrics
+  draft: false
   name_template: 'Release {{.Version}}'
 checksum:
+  name_template: '{{ .ProjectName }}_{{ .Version }}_checksums.txt'
+  algorithm: sha256
+
 git:
   tag_sort: -version:creatordate
 
+changelog:
+  disable: true

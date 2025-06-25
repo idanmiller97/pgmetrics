@@ -149,6 +149,15 @@ PostgreSQL Cluster:
 	reportProgress(fd, result)
 	reportDeadlocks(fd, result)
 	reportAutovacuums(fd, result)
+	
+	// Enhanced monitoring reports
+	reportWaitEventSummary(fd, result)
+	reportActiveSessions(fd, result)
+	reportBlockedSessions(fd, result)
+	reportWALReceiverStatus(fd, result)
+	reportReplicationStatus(fd, result)
+	reportTestQuery(fd, result)
+	
 	reportRoles(fd, result)
 	reportTablespaces(fd, result)
 	reportDatabases(fd, result)
@@ -1433,6 +1442,141 @@ System Information:
 	add("max_parallel_workers_per_gather")
 	add("effective_io_concurrency")
 	tw.write(fd, "    ")
+}
+
+// reportWaitEventSummary displays wait event summary information in human-readable format
+func reportWaitEventSummary(fd io.Writer, result *pgmetrics.Model) {
+	if len(result.WaitEventSummary) == 0 {
+		return
+	}
+
+	fmt.Fprint(fd, `
+Wait Event Summary:
+`)
+	var tw tableWriter
+	tw.add("Wait Event Type", "Wait Event", "Sessions")
+	for _, wes := range result.WaitEventSummary {
+		tw.add(wes.WaitEventType, wes.WaitEvent, wes.Sessions)
+	}
+	tw.write(fd, "    ")
+}
+
+// reportActiveSessions displays active sessions information in human-readable format
+func reportActiveSessions(fd io.Writer, result *pgmetrics.Model) {
+	if len(result.ActiveSessions) == 0 {
+		return
+	}
+
+	fmt.Fprint(fd, `
+Active Sessions:
+`)
+	var tw tableWriter
+	tw.add("PID", "Wait Event Type", "Wait Event", "State", "Duration (sec)", "Query")
+	for _, as := range result.ActiveSessions {
+		query := as.Query
+		if len(query) > 50 {
+			query = query[:50] + "..."
+		}
+		tw.add(as.PID, as.WaitEventType, as.WaitEvent, as.State, 
+			fmt.Sprintf("%.1f", as.Duration), query)
+	}
+	tw.write(fd, "    ")
+}
+
+// reportBlockedSessions displays blocked sessions information in human-readable format
+func reportBlockedSessions(fd io.Writer, result *pgmetrics.Model) {
+	if len(result.BlockedSessions) == 0 {
+		return
+	}
+
+	fmt.Fprint(fd, `
+Blocked Sessions:
+`)
+	var tw tableWriter
+	tw.add("Blocked PID", "Wait Event Type", "Wait Event", "Blocking PIDs", "Query")
+	for _, bs := range result.BlockedSessions {
+		query := bs.BlockedQuery
+		if len(query) > 50 {
+			query = query[:50] + "..."
+		}
+		blockingPIDs := make([]string, len(bs.BlockingPIDs))
+		for i, pid := range bs.BlockingPIDs {
+			blockingPIDs[i] = fmt.Sprintf("%d", pid)
+		}
+		tw.add(bs.BlockedPID, bs.WaitEventType, bs.WaitEvent, 
+			strings.Join(blockingPIDs, ", "), query)
+	}
+	tw.write(fd, "    ")
+}
+
+// reportWALReceiverStatus displays WAL receiver status in human-readable format
+func reportWALReceiverStatus(fd io.Writer, result *pgmetrics.Model) {
+	if result.WALReceiverStatus == nil {
+		return
+	}
+
+	wrs := result.WALReceiverStatus
+	fmt.Fprintf(fd, `
+WAL Receiver Status:
+    PID:                 %d
+    Status:              %s
+    Receive Start LSN:   %s
+    Receive Start TLI:   %d
+    Latest End LSN:      %s
+    Slot Name:           %s
+    Last Msg Send:       %s
+    Last Msg Receipt:    %s
+    Latest End Time:     %s
+`,
+		wrs.PID,
+		wrs.Status,
+		wrs.ReceiveStartLSN,
+		wrs.ReceiveStartTLI,
+		wrs.LatestEndLSN,
+		wrs.SlotName,
+		fmtTimeAndSince(wrs.LastMsgSendTime),
+		fmtTimeAndSince(wrs.LastMsgReceiptTime),
+		fmtTimeAndSince(wrs.LatestEndTime),
+	)
+}
+
+// reportReplicationStatus displays replication status in human-readable format
+func reportReplicationStatus(fd io.Writer, result *pgmetrics.Model) {
+	if len(result.ReplicationStatus) == 0 {
+		return
+	}
+
+	fmt.Fprint(fd, `
+Replication Status:
+`)
+	var tw tableWriter
+	tw.add("PID", "User", "Application", "Client Address", "State", "Sent LSN", "Write LSN", "Flush LSN", "Replay LSN")
+	for _, rs := range result.ReplicationStatus {
+		tw.add(rs.PID, rs.UserName, rs.ApplicationName, rs.ClientAddr, rs.State,
+			rs.SentLSN, rs.WriteLSN, rs.FlushLSN, rs.ReplayLSN)
+	}
+	tw.write(fd, "    ")
+}
+
+// reportTestQuery displays test query results in human-readable format
+func reportTestQuery(fd io.Writer, result *pgmetrics.Model) {
+	if result.Settings == nil {
+		return
+	}
+	
+	testResult, exists := result.Settings["test_query_result"]
+	if !exists {
+		return
+	}
+
+	fmt.Fprintf(fd, `
+Test Query Results:
+    Status:              %s
+    Value:               %s
+`,
+		testResult.Source,
+		testResult.Setting,
+	)
 }
 
 //------------------------------------------------------------------------------
